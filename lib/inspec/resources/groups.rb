@@ -165,21 +165,38 @@ module Inspec::Resources
   # This uses `dscacheutil` to get the group info instead of `etc_group`
   class DarwinGroup < GroupInfo
     def groups
-      group_info = inspec.command("dscacheutil -q group").stdout.split("\n\n")
+      group_by_id = `dscl . -list /Groups PrimaryGroupID`.lines.map { |l| name, id = l.split; [id.to_i, name] }.to_h
+
+      users = `dscl . -list /Users PrimaryGroupID`.lines.map { |l| name, id = l.split; [name, id.to_i] }.to_h
+
+      users_by_group = users.keys.group_by { |k| users[k] }.map { |k, vs| [group_by_id[k], vs] }.to_h
+
+      membership = `dscl . -list /Groups GroupMembership`.lines.map { |l| k, *v = l.split; [k, v] }.to_h
+
+      users_by_group.each do |name, users|
+        if membership[name] then
+          membership[name].concat users
+        else
+          membership[name] = users
+        end
+      end
+
+      group_info = inspec.command("dscacheutil -q group").stdout.split("\n\n").uniq
 
       groups = []
       regex = /^([^:]*?)\s*:\s(.*?)\s*$/
-      group_info.each do |data|
-        groups << inspec.parse_config(data, assignment_regex: regex).params
-      end
+      groups = group_info.map { |data|
+        inspec.parse_config(data, assignment_regex: regex).params
+      }
 
       # Convert the `dscacheutil` groups to match `inspec.etc_group.entries`
       groups.each { |g| g["gid"] = g["gid"].to_i }
       groups.each do |g|
-        next if g["users"].nil?
-
-        g["members"] = g.delete("users")
-        g["members"].tr!(" ", ",")
+        users = g.delete("users") || ""
+        users = users.split
+        users += Array(users_by_group[g["name"]])
+        g["members"] = users
+        g["members"].sort.join ","
       end
     end
   end
